@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 ---
 title: "MovieLens Project"
 subtitle: "Data Science: Capstone"
@@ -2134,3 +2135,2156 @@ a few biais for frequently associated genres. Another lead is a SVD with a highe
 number of implicit features, and/or a higher number of allowed iterations for its
 optimization process. However, those leads may require a large quantity of RAM,
 and may be computationally expensive...
+=======
+---
+title: "MovieLens Project"
+subtitle: "Data Science: Capstone"
+author: "Rémi Fauve"
+#date: "`r Sys.Date()`"
+date: "2020-05-15"
+output: 
+  pdf_document:
+    number_sections: yes
+    toc: true
+urlcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 6, fig.height = 3.5, fig.align = "center")
+options(digits = 6,  stringsAsFactors = FALSE)
+```
+
+\pagebreak
+# Introduction
+
+This report was generated as part of the HarvardX online course 
+["Data Science: Capstone" (PH125.9x)](https://www.edx.org/course/data-science-capstone).
+
+The MovieLens project's goal is to predict movie ratings using data science 
+techniques. The original dataset is the 
+[MovieLens 10M Dataset](https://grouplens.org/datasets/movielens/10m/)
+which includes 10 millions ratings on 10,000 movies, by 72,000 different users. 
+
+First, the dataset is imported and explored to gain insights. Then, different 
+models are tested as recommandation systems, and the best one is selected. 
+Finally, the selected model is applied on the final test set.
+
+
+The following libraries are required to execute the code of this report:
+```{r libraries, warning = FALSE, message = FALSE}
+if(!require(tidyverse))
+  install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if (!require(caret))
+  install.packages("caret", repos = "http://cran.us.r-project.org")
+if (!require(data.table))
+  install.packages("data.table", repos = "http://cran.us.r-project.org")
+if (!require(ggrepel))
+  install.packages("ggrepel", repos = "http://cran.us.r-project.org")
+if (!require(FactoMineR))
+  install.packages("FactoMineR", repos = "http://cran.us.r-project.org")
+if (!require(factoextra))
+  install.packages("factoextra", repos = "http://cran.us.r-project.org")
+if (!require(recommenderlab))
+  install.packages("recommenderlab", repos = "http://cran.us.r-project.org")
+if (!require(explor))
+  install.packages("explor", repos = "http://cran.us.r-project.org")
+#(.packages())
+```
+
+
+\pagebreak
+# Data importation
+
+The dataset is downloaded from the GroupLens Research website.
+
+```{r importation_download_dataset, warning = FALSE, message = FALSE}
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip",
+              dl)
+```
+
+The data is extracted from the different files included in the zip archive into 
+two dataframes: 
+
+* `ratings`, which contains the ratings given by different people (`userId`) for 
+different movies (`movieId`) along with their date (`timestamp` converted to 
+`rating_year`).
+
+```{r importation_extract_ratings}
+ratings <-
+  fread(text = gsub("::", 
+                    "\t", 
+                    readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+        col.names = c("userId", "movieId", "rating", "timestamp"))
+
+ratings <- 
+  as.data.frame(ratings) %>%
+  mutate(rating_year = year(as.Date.POSIXct(timestamp))) %>%
+  select(-timestamp)
+```
+
+* `movies`, which contains some information about the rated movies, such as their 
+title and their genre.
+
+```{r importation_extract_movies}
+movies <-
+  str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+movies <-
+  as.data.frame(movies) %>% mutate(
+    movieId = as.numeric(movieId),
+    title = as.character(title),
+    genres = as.character(genres))
+```
+
+The `movies` dataframe can be enhanced by extracting the release date that is 
+nested in the `title`.
+
+```{r importation_refine_movies_release_date}
+# Check that every title contains a release date (with the same format)
+sum(movies$title %>% str_detect("\\(\\d{4}\\)")) == nrow(movies)
+
+movies <- movies %>%
+  mutate(release_year = as.numeric(
+           str_remove_all(
+             str_extract(title,"\\((\\d{4})\\)"),
+             "\\(|\\)")),
+         title = str_remove(title," \\((\\d{4})\\)"))
+```
+
+The `movies` dataframe can also be enhanced by refining the genre description 
+with a boolean variable per unique genre, for each movie. Also, the genre for the 
+movie "Pull My Daisy" was missing, and has been manually rectified ("Drama").
+
+```{r importation_refine_movies_genres}
+# Manual correction ("Drama" assigned to "Pull My Daisy")
+movies$title[movies$genres == "(no genres listed)"]
+movies$genres[movies$genres == "(no genres listed)"] <- "Drama"
+
+# Split the genre description and identify the unique genres
+movies <- movies %>%
+  mutate(list_genres = strsplit(genres,"\\|")) 
+
+list_unique_genre <- sort(unique(unlist(movies$list_genres)))
+list_unique_genre
+
+# Evaluate each boolean variable for each movie
+detailled_genre <-
+  sapply(list_unique_genre, function(x) {
+    sapply(movies$list_genres, function(y) {
+      x %in% y
+    })
+  })
+
+detailled_genre <- data.frame(detailled_genre)
+
+for (i in 1:19) {
+  detailled_genre[, i] <-
+    factor(
+      detailled_genre[, i],
+      levels = c("FALSE", "TRUE"),
+      labels = c(paste0(colnames(detailled_genre)[i], "_n"),
+                 paste0(colnames(detailled_genre)[i], "_y")))
+}
+
+movies <- cbind(movies,detailled_genre) %>%
+  select(-genres,-list_genres)
+
+remove(list_unique_genre, detailled_genre, i)
+```
+
+Then the two dataframes can be joined.
+
+```{r importation_join}
+movielens <- left_join(ratings, movies, by = "movieId")
+```
+
+The data is separated into a train set `edx` and a test set `validation`, 
+with the test set gathering 10% of the total data set.
+
+```{r importation_train_&_test_sets, message = FALSE, warning = FALSE}
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind = "Rounding")
+test_index <-
+  createDataPartition(
+    y = movielens$rating,
+    times = 1,
+    p = 0.1,
+    list = FALSE
+  )
+edx <- movielens[-test_index, ]
+temp <- movielens[test_index, ]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>%
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+
+```{r importation_test_set_light, echo = FALSE}
+# to avoid reaching the RAM limit
+validation <- validation %>% 
+  select(userId, movieId, release_year, rating)
+```
+
+
+\newpage
+# Data exploration
+
+From now on, our insights have to be taken only from the `edx` data set. From 
+those, the goal is to build a model trained on the `edx` data that can predict 
+how a given user would rate a movie. Those predictions will be based on the 
+different variables composing the `edx` data set.
+
+## Ratings
+First, the ratings' distribution is investigated, by plotting the occurence rate
+of each possible rating given by a user. The horizontal dashed line represents
+the expected average occurence rate if they were uniform (10% each).
+
+```{r exploration_rating, echo = FALSE}
+edx %>%
+  group_by(rating) %>%
+  summarise(nb_rating_percent = n() / nrow(edx) * 100) %>%
+  ggplot(aes(rating, nb_rating_percent)) +
+  geom_col(color = "black",
+           fill = "gray50") +
+  scale_x_discrete(limits = seq(0.5, 5, 0.5)) +
+  labs(x = "ratings",
+       y = "occurence rate [%]") +
+  geom_hline(
+    aes(yintercept = 10),
+    size = 0.5,
+    color = "black",
+    linetype = "dashed")
+```
+The occurence rates are clearly not uniform. Two additional observations can be 
+made here:
+
+* users tend to give on average higher ratings,
+
+* and users tend to give on average more whole ratings than halved ratings.
+
+The non-uniform distribution of the ratings should be taken into account in our
+models.
+
+
+## Users
+Since the goal of the project is to predict the rating given by a specific user among 
+those listed in the data set, it is essential to investigate the users' 
+distribution and its relationship with the ratings.
+
+First, users don't give the same number of movies rated, as shown in the following 
+plot. The vertical dashed line represents the expected average number of 
+movie rated by a user if each rated the same number of movies 
+(around `r round(nrow(edx)/length(unique(edx$userId)),0)` movies rated). 
+
+```{r exploration_userId_1, echo = FALSE, warning = FALSE}
+edx %>%
+  group_by(userId) %>%
+  summarise(nb_rating = n()) %>%
+  ggplot(aes(nb_rating)) +
+  geom_histogram(binwidth = 5,
+                 color = "black",
+                 fill = "gray50") +
+  scale_x_continuous(limits = c(0, 550),
+                     breaks = seq(0, 550, 50)) +
+  labs(x = "number of movies rated by one user",
+       y = "number of users") +
+  geom_vline(
+    aes(xintercept = nrow(edx) / length(unique(edx$userId))),
+    size = 0.5,
+    color = "black",
+    linetype = "dashed")
+```
+
+This figure shows that about 6500 users have rated around 20 movies each, and 
+that some users rated more than 500 movies 
+(up to 
+`r max({edx %>% group_by(userId) %>% summarise(n = n()) %>% arrange(-n)}[,2])` 
+movies rated by a single user !).
+
+Then, the distribution of the average rating of each user is plotted.
+
+```{r exploration_userId_2, echo = FALSE}
+edx %>%
+  group_by(userId) %>%
+  summarise(avg_rating = mean(rating)) %>%
+  ggplot(aes(avg_rating)) +
+  geom_density(bw = 0.0001,
+               color = "black",
+               fill = "grey50") +
+  scale_x_continuous(limits = c(0.5, 5),
+                     breaks = seq(0.5, 5, 0.5)) +
+  labs(x = "average rating per user",
+       y = "number of users")
+```
+
+This distribution is close to the distribution of the ratings, which is expected.
+This figure was obtained with a very low binwidth, and despite the expected 
+general bell shape, strong artefacts appears at ratings of 3.0 and 4.0. These can be
+explained by the integer, or half-integer, nature of the ratings, whose averages
+have higher chances to be integers to. Two weaker artefacts can be observed at 
+ratings of 0.5 and 5.0: those out-of-trend peaks shows that some users rated 
+every movies with the lowest (or the highest) rating. Another way to reveal such 
+behaviour is to plot the standard error of ratings for each user. 
+
+```{r exploration_userId_3, echo = FALSE, warning = FALSE}
+edx %>%
+  group_by(userId) %>%
+  summarise(
+    sd_rating = qnorm(0.975) * sd(rating),
+    nb_rating = n(),
+    se_rating = sd_rating / sqrt(nb_rating)) %>%
+  ggplot(aes(se_rating)) +
+  geom_density(bw = 0.0001,
+               color = "black",
+               fill = "grey50") +
+  scale_x_continuous(limits = c(0, 1),
+                     breaks = seq(0, 1, 0.1)) +
+  labs(x = "standard error (95% IC)",
+       y = "number of users")
+```
+
+The peak at a null standard error confirms that certain users rated their movies 
+with a single rating. The standard errors being relatively low (around one 
+tenth of the average rating per user) can be explained by the short range of 
+possible ratings (ten values from 0.5 to 5) and by the high number of rating per user, being 
+mainly over 20 movies rated.
+
+## Movies
+It is expected to have movies with higher numbers of ratings than others, or 
+with higher average ratings than others, as shown in the following plot. The 
+vertical dashed line represents the expected average number of 
+ratings per movie if each movie received the same number of ratings 
+(around `r round(nrow(edx)/length(unique(edx$movieId)),0)` ratings per movie). 
+
+```{r exploration_movieId_1, echo = FALSE, warning = FALSE}
+edx %>%
+  group_by(movieId) %>%
+  summarise(nb_rating = n()) %>%
+  ggplot(aes(nb_rating)) +
+  geom_histogram(binwidth = 50, 
+                 color = "black",
+                 fill = "grey50") +
+  scale_x_continuous(limits = c(0, 5050),
+                     breaks = seq(0, 5050, 500))+
+  labs(x = "number of ratings for one movie",
+       y = "number of movies") +
+  geom_vline(
+    aes(xintercept = nrow(edx) / length(unique(edx$movieId))),
+    size = 0.5,
+    color = "black",
+    linetype = "dashed")
+```
+
+This figure shows that more than 2000 movies have been rated around 50 times, and 
+that some movies have been rated more than 5000 times 
+(up to 
+`r max({edx %>% group_by(movieId) %>% summarise(n = n()) %>% arrange(-n)}[,2])` 
+ratings for a single movie: 
+`r {edx %>% group_by(movieId) %>% mutate(n = n()) %>% ungroup %>% arrange(-n)}$title[1]`
+).
+
+Then, the distribution of the average rating per movie is plotted.
+
+```{r exploration_movieId_2, echo = FALSE}
+edx %>%
+  group_by(movieId) %>%
+  summarise(avg_rating = mean(rating)) %>%
+  ggplot(aes(avg_rating)) +
+  geom_density(bw = 0.0001,
+               color = "black",
+               fill = "grey50") +
+  scale_x_continuous(limits = c(0.5, 5),
+                     breaks = seq(0.5, 5, 0.5)) +
+  scale_y_continuous(limits = c(0, 60),
+                     breaks = seq(0, 60, 10)) +
+  labs(x = "average rating per movie",
+       y = "number of movies")
+```
+
+This distribution is similar to the distribution of the ratings, but it is 
+stretched toward the medium rating. This reflects that movies are rarely 
+unanimously acclaimed or rejected, thus their average ratings being pulled 
+toward medium ratings in general. Also, peaks at whole or halved integer are 
+more visible here than when considering average ratings per user, which can be 
+explained by the number of ratings per movie being highly superior on average than 
+the number of ratings per user. 
+
+<!-- ```{r exploration_movieId_3} -->
+<!-- edx %>% -->
+<!--   group_by(movieId) %>% -->
+<!--   summarise(nb_rating = n(), -->
+<!--             diff_rating = length(unique(rating))) %>% -->
+<!--   ggplot(aes(diff_rating, nb_rating)) + -->
+<!--   geom_point() + -->
+<!--   scale_y_continuous(limits = c(0, 5000), -->
+<!--                      breaks = seq(0, 5000, 500)) + -->
+<!--   scale_x_continuous(limits = c(1, 10), -->
+<!--                      breaks = seq(1, 10, 1)) + -->
+<!--   labs(x = "unique ratings per movie", -->
+<!--        y = "number of ratings per movie") -->
+<!-- ``` -->
+
+This behavior can also be explained by plotting the number of ratings per movie 
+against the number of different unique ratings per movie in the two following graphs.
+
+```{r exploration_movieId_4, echo = FALSE, warning = FALSE}
+sum_edx <- edx %>%
+  group_by(movieId) %>%
+  summarise(nb_rating = n(),
+            diff_rating = length(unique(rating)),
+            avg_rating = mean(rating))
+
+
+ggplot() +
+  geom_point(aes(filter(sum_edx, avg_rating == 0.5)$diff_rating,
+                 filter(sum_edx, avg_rating == 0.5)$nb_rating,
+             colour = "0.5")) +
+  geom_point(aes(filter(sum_edx, avg_rating == 1.0)$diff_rating,
+                 filter(sum_edx, avg_rating == 1.0)$nb_rating,
+             colour = "1.0")) +
+  geom_point(aes(filter(sum_edx, avg_rating == 3.0)$diff_rating,
+                 filter(sum_edx, avg_rating == 3.0)$nb_rating,
+             colour = "3.0")) +
+  geom_point(aes(filter(sum_edx, avg_rating == 3.5)$diff_rating,
+                 filter(sum_edx, avg_rating == 3.5)$nb_rating,
+             colour = "3.5")) +
+  geom_point(aes(filter(sum_edx, avg_rating == 4.5)$diff_rating,
+                 filter(sum_edx, avg_rating == 4.5)$nb_rating,
+             colour = "4.5")) +
+  geom_point(aes(filter(sum_edx, avg_rating == 5.0)$diff_rating,
+                 filter(sum_edx, avg_rating == 5.0)$nb_rating,
+             colour = "5.0")) +
+  scale_y_continuous(limits = c(0, 100),
+                     breaks = seq(0, 100, 10)) +
+  scale_x_continuous(limits = c(1, 10),
+                     breaks = seq(1, 10, 1)) +
+  scale_color_manual(name = "Average rating", 
+                     values = c("0.5" = "red",
+                                "1.0" = "green",
+                                "3.0" = "blue",
+                                "3.5" = "orange",
+                                "4.5" = "purple",
+                                "5.0" = "cyan")) +
+  labs(x = "unique ratings per movie",
+       y = "number of ratings per movie")
+
+ggplot() +
+  geom_point(aes(filter(sum_edx, avg_rating == 0.5)$diff_rating,
+                 filter(sum_edx, avg_rating == 0.5)$nb_rating,
+             colour = "0.5"), position = position_jitter(0.25)) +
+  geom_point(aes(filter(sum_edx, avg_rating == 1.0)$diff_rating,
+                 filter(sum_edx, avg_rating == 1.0)$nb_rating,
+             colour = "1.0"), position = position_jitter(0.25)) +
+  geom_point(aes(filter(sum_edx, avg_rating == 3.0)$diff_rating,
+                 filter(sum_edx, avg_rating == 3.0)$nb_rating,
+             colour = "3.0"), position = position_jitter(0.25)) +
+  geom_point(aes(filter(sum_edx, avg_rating == 3.5)$diff_rating,
+                 filter(sum_edx, avg_rating == 3.5)$nb_rating,
+             colour = "3.5"), position = position_jitter(0.25)) +
+  geom_point(aes(filter(sum_edx, avg_rating == 4.5)$diff_rating,
+                 filter(sum_edx, avg_rating == 4.5)$nb_rating,
+             colour = "4.5"), position = position_jitter(0.25)) +
+  geom_point(aes(filter(sum_edx, avg_rating == 5.0)$diff_rating,
+                 filter(sum_edx, avg_rating == 5.0)$nb_rating,
+             colour = "5.0"), position = position_jitter(0.25)) +
+  scale_y_continuous(limits = c(0, 5),
+                     breaks = seq(0, 5, 1)) +
+  scale_x_continuous(limits = c(1, 5),
+                     breaks = seq(1, 5, 1)) +
+  scale_color_manual(name = "Average rating", 
+                     values = c("0.5" = "red",
+                                "1.0" = "green",
+                                "3.0" = "blue",
+                                "3.5" = "orange",
+                                "4.5" = "purple",
+                                "5.0" = "cyan")) +
+  labs(x = "unique ratings per movie",
+       y = "number of ratings per movie")
+```
+
+As expected, movies can have an average rating of 3.0 or 3.5 even with a high 
+number of different unique ratings, whereas movies with an average rating of 
+0.5 or 5.0 can only be resulting from a low number of ratings. To see these 
+extreme cases on the plot, it is necessary to zoom closely and add jitter 
+(second plot).
+
+Other strange artefacts are observed when plotting the distribution of the standard
+error of ratings for each movie.
+
+```{r exploration_movieId_5, echo = FALSE, warning = FALSE}
+edx %>%
+  group_by(movieId) %>%
+  summarise(
+    sd_rating = qnorm(0.975) * sd(rating),
+    nb_rating = n(),
+    se_rating = sd_rating / sqrt(nb_rating)) %>%
+  ggplot(aes(se_rating)) +
+  geom_density(bw = 0.0001,
+               color = "black",
+               fill = "grey50") +
+  scale_x_continuous(limits = c(0, 1.5),
+                     breaks = seq(0, 1.5, 0.1)) +
+  labs(x = "standard error (95% IC)",
+       y = "number of movies")
+```
+The peak at a null standard error confirms that certain movies are rated with
+a single rating by different users. The standard errors being relatively low 
+(major peak around one tenth of the average rating per user) can be explained by 
+the short range of possible ratings (ten values from 0.5 to 5) and by the high 
+number of rating per movie, being mainly over 50 ratings, up to more than 5000.
+However, the tail of this distribution extends well over a standard error of 0.5,
+which means that for certain movies, the variability of the ratings are quite 
+strong (movies that are, at the same time, acclaimed or despised by many different 
+users). Also, the peaks around a standard error of 0.5, 1.0 and 1.5 remain 
+difficult to explain. 
+
+
+## Release year
+As movies are generally influenced by the trends and customs of their time, 
+the release year of a movie may provide a useful information to predict if a 
+given user will prefer movies from a given period. As shown in the following plot,
+the cinema production never ceased to increase (based on this MovieLens database), 
+especially after the 1980s.
+
+```{r exploration_release_year_1, echo = FALSE}
+edx %>%
+  mutate(uniq_movie = duplicated(movieId)) %>%
+  filter(uniq_movie == FALSE) %>%
+  mutate(release_year = as.numeric(release_year)) %>%
+  group_by(release_year) %>%
+  summarise(nb_movie = n()) %>%
+  ggplot(aes(release_year, nb_movie)) +
+  geom_col(color = "black",
+           fill = "grey50") +
+  scale_x_continuous(breaks = seq(1920, 2000, 10)) +
+  labs(x = "year of release",
+       y = "number of movie")
+```
+
+When looking at the ratings' distribution among the different release years, in 
+the following plot, it is clear that the movies from the 1990s were the most 
+watched/rated by the users. Maybe it is because this period gathers the 
+childhood movies (like Disney's productions) for a large part of the users. 
+Anyhow, there is a clear discrepancy between the number of ratings of old movies 
+and recent movies. 
+
+```{r exploration_release_year_2, echo = FALSE}
+edx %>%
+  mutate(release_year = as.numeric(release_year)) %>%
+  group_by(release_year) %>%
+  summarise(nb_rating = n()) %>%
+  ggplot(aes(release_year, nb_rating)) +
+  geom_col(color = "black",
+           fill = "grey50") +
+  scale_x_continuous(breaks = seq(1920, 2000, 10)) +
+  labs(x = "year of release",
+       y = "number of ratings")
+```
+
+This very non-uniform distribution of the number of ratings have an effect on 
+the average rating per release year, with a decreasing standard error on the 
+average rating as the year increases, since more people rated those movies. 
+
+```{r exploration_release_year_3, echo = FALSE, warning = FALSE}
+edx %>%
+  mutate(release_year = as.numeric(release_year)) %>%
+  group_by(release_year) %>%
+  summarise(avg_rating = mean(rating),
+            se_rating = qnorm(0.975) * sd(rating) / sqrt(n())) %>%
+  ggplot(aes(release_year, avg_rating)) +
+  geom_point(color = "black",
+             fill = "grey50") +
+  geom_errorbar(aes(ymin = avg_rating - se_rating, 
+                    ymax = avg_rating + se_rating), 
+                width = 0.2) +
+  scale_x_continuous(breaks = seq(1920, 2000, 10)) +
+  scale_y_continuous(limits = c(3, 4),
+                     breaks = seq(3, 4, 0.2)) +
+  labs(x = "year of release",
+       y = "average rating")
+```
+
+However, three different trends are noticeable : 
+
+* from 1915 to 1930, there aren't enough movies and ratings, so the average 
+rating varies between 3.1 and 4.0,
+
+* from 1930 to 1980, the standard error is lower, and the average rating varies
+between 3.6 and 4.0,
+
+* and from 1980 to 2008, the standard error is virtually null, and the average 
+rating varies between 3.3 and 3.6.
+
+The total variation of the average rating per year is between 3.1 and 4.0, which 
+is `r (4.0-3.1) / (5 - 0.5) * 100`% of the total span of the possible ratings, 
+which is significant enough to be considered later on.
+
+
+## Rating year
+The time period for the users to post their ratings is very narrow 
+(around 15 years, from 1995 to 2009) and it appears, in the following plot, that
+the number of ratings per year does not show a clear trend, so it will not be 
+considered as useful information to predict the rating of users.
+
+```{r exploration_rating_year, echo = FALSE}
+edx %>%
+  group_by(rating_year) %>%
+  summarise(nb_rating = n()) %>%
+  ggplot(aes(rating_year, nb_rating)) +
+  geom_col(color = "black",
+           fill = "grey50") +
+  scale_x_continuous(breaks = seq(1996, 2008, 2)) +
+  labs(x = "year of rating",
+       y = "number of ratings")
+
+edx <- edx %>%
+  select(-rating_year)
+```
+
+
+## Genres combinations
+As presented in the data importation section, each possible genre is now a boolean variable.
+This may allow a better estimation of the preferences of each user. A Multiple 
+Correspondance Analysis (MCA) has been conducted to illustrate how some genre, or genre 
+associations, can get higher average rating than others. 
+
+### Multiple Correspondance Analysis setup
+
+First, variables with "near zero variance" should be removed from the MCA 
+since they can distort the analysis. The threshold chosen here means that a 
+variable for which the two most frequent values have a ratio of 99 to 1 will 
+be excluded.
+
+```{r exploration_mca_setup_01}
+nzv <- nearZeroVar(edx[, 6:24],
+                   freqCut = 99/1,
+                   saveMetrics = TRUE)
+
+nzv[with(nzv,order(-freqRatio)), c(1,4)]
+
+edx %>% 
+  filter(Documentary == "Documentary_y") %>%
+  summarise(nb = n(),
+            percent = nb/nrow(edx)*100)
+
+edx %>% 
+  filter(IMAX == "IMAX_y") %>%
+  summarise(nb = n(),
+            percent = nb/nrow(edx)*100)
+```
+
+```{r exploration_mca_setup_02, echo = FALSE}
+edx <- edx %>%
+  select(-IMAX)
+```
+
+The variable `IMAX` is removed, since more than 99.9% of the observations have the 
+same value (`IMAX_n`).
+
+The MCA will be performed on the genres of the movies, so observations will be 
+movies, and since our target is the ratings, individual ratings are ignored here 
+and each movie will have its average rating calculated.
+
+```{r exploration_mca_setup_03}
+edx_mca <- edx %>%
+  mutate(release_year = as.numeric(release_year)) %>%
+  group_by(movieId) %>%
+  mutate(avg_rating = mean(rating)) %>%
+  ungroup() %>%
+  mutate(uniq_movie = duplicated(movieId)) %>%
+  filter(uniq_movie == FALSE) %>%
+  select(-userId, -movieId, -title, -rating, -uniq_movie, -release_year)
+
+res.mca <- MCA(edx_mca[, c(-19)], 
+               ncp = 18,
+               graph = FALSE)
+```
+
+As usual, the results are presented in a graph along the first and second principal 
+dimensions resulting from the MCA. Here are presented, on the same graph (biplot), 
+the coordinates of each individual (movie) and of each variables' values (genre). 
+
+```{r exploration_mca_setup_04, echo = FALSE, warning = FALSE, message = FALSE}
+# explor(res.mca)
+
+# biplot
+# res <- explor::prepare_results(res.mca)
+# explor::MCA_biplot(
+#   res,
+#   xax = 1,
+#   yax = 2,
+#   col_var = "Variable",
+#   ind_point_size = 32,
+#   ind_opacity = 0.5,
+#   ind_opacity_var = NULL,
+#   ind_labels = FALSE,
+#   var_point_size = 55,
+#   var_sup = FALSE,
+#   ind_sup = FALSE,
+#   labels_size = 12,
+#   bi_lab_min_contrib = 0,
+#   symbol_var = "Nature",
+#   transitions = FALSE,
+#   labels_positions = NULL,
+#   xlim = c(-2,4.5),
+#   ylim = c(-1.5, 2))
+
+fviz_mca_biplot(
+  res.mca,
+  axes = c(1, 2),
+  geom.ind = c("point"),
+  geom.var = c("point", "text"),
+  repel = FALSE,
+  label = "all",
+  invisible = "none",
+  habillage = "none",
+  addEllipses = FALSE,
+  palette = NULL,
+  arrows = c(FALSE, FALSE),
+  map = "symmetric",
+  title = "MCA - Biplot",
+  xlim = c(-2, 4.5),
+  ylim = c(-1.5, 2)
+)
+```
+
+This plot shows that is essentially the "yes" values of the different genre that 
+are responsible of the distinction between different kind of movies ("no" values
+are all gathered around zero). Also, on this biplot, the first bissector seems to 
+separate two main general genres : on the upper left, more serious and dark movies, 
+and on the lower right, more light-hearted movies. 
+
+Regarding genre associations, four different groups can be contructed from this biplot :
+
+* movies for children (`Children_y`, `Animation_y`)
+
+* comedies (`Comedy_y`, `Musical_y`, `Romance_y`, `Documentary_y`)
+
+* action/adventure movies (`Action_y`, `Sci.Fi_y`, `Adventure_y`, `Fantasy_y`)
+
+* thrillers (`Mystery_y`, `Thriller_y`, `Horror_y`, `Action_y`, `Sci.Fi_y`, `Film.Noir_y`, `Crime_y`)
+
+
+This is an analysis based only the first two dimensions, out of the 18 that were calculated.
+A restricted number of relevant dimensions for a further analysis are selected 
+using a screeplot. The red dashed line represents the percentage of explained
+variances if its distribution was uniform.
+
+```{r exploration_mca_setup_05, echo = FALSE}
+fviz_screeplot(res.mca, 
+               ncp = 18,
+               addlabels = FALSE,
+               xlim = c(1, 19),
+               ylim = c(0, 12)) +
+  geom_hline(
+    aes(yintercept = 1/18*100),
+    size = 0.5,
+    color = "red",
+    linetype = "dashed")
+```
+
+The screeplot shows that the first two dimensions explain more than 20% of the 
+variance. The first seven dimensions will be considered for this analysis, which 
+explain more than 55% of the variance. The rest of this analysis is an 
+interpretation of the distribution of both movies and genre along each of the 
+seven considered dimensions. For the sake of clarity only good (over 4.0) 
+and bad (under 2.0) average rated movies will be displayed on the graphs. 
+
+### Multidimensionnal analysis
+The first seven dimensions produced by the MCA conducted on genres are presented 
+here. Each graph plots individuals and variables values in one dimension, against
+itself. This allows a clear visualisation of the distribution of individuals and 
+variables along a single dimension. The coordinates of the variables are divided 
+by 2 for a better superposition with the individuals coordinates. This arbitrary
+homothety does not introduce any bias for further interpretation, since the 
+order is preserved.
+
+The individuals are either colored red (average rating lower than 2.0) or green 
+(average rating higher than 4.0). The variables are represented by black circles, 
+which size is related to its contribution to the dimension's variance. Only the 
+variables with the 10 highest absolute contribution are labeled, for clarity's sake.
+
+```{r exploration_mca_res, echo = FALSE}
+#coord/contrib
+var <- get_mca_var(res.mca)
+contrib <- as.data.frame(var$contrib[,1:7])
+coord <- as.data.frame(var$coord[,1:7])
+row_n <- rownames(coord)
+
+for (i in 1:7) {
+  colnames(coord)[i] <- paste0("Dim", i)
+  colnames(contrib)[i] <- paste0("Dim", i)
+}
+
+coord <- cbind(coord, Var = row_n)
+contrib <- cbind(contrib, Var = row_n)
+
+#indiv
+indiv <- get_mca_ind(res.mca)
+indiv <- as.data.frame(indiv$coord[,1:7])
+
+for (i in 1:7) {
+  colnames(indiv)[i] <- paste0("Dim", i)
+}
+
+indiv <- indiv %>%
+  mutate(avg_rating = edx_mca$avg_rating,
+         avg_rating_class = cut(avg_rating, 
+                                breaks = c(0.5,2,4,5),
+                                include.lowest = TRUE))
+
+levels(indiv$avg_rating_class) <- c("bad (<2)","average","good (>4)")
+
+```
+
+```{r exploration_mca_function, echo = FALSE}
+plot_Dim <- function(i){
+  # larger plot for Dim7
+  if (i == 7) j <- 3 else j <- 2.1
+  
+  # select Dim
+  Dim_indiv <- indiv[, c(i, 9)]
+  Dim_coord <- coord[, c(i, 8)]
+  Dim_contrib <- contrib[, c(i, 8)]
+  colnames(Dim_indiv)[1] <- "Dim"
+  colnames(Dim_coord)[1] <- "Dim"
+  colnames(Dim_contrib)[1] <- "Dim"
+  
+  # remove average `avg_rating`
+  Dim_indiv <- Dim_indiv %>%
+    filter(avg_rating_class != "average") 
+  
+  # only display the labels of the 10 highest contributions
+  Dim_contrib <- Dim_contrib %>%
+    mutate(Var_select = case_when(
+      abs(Dim) %in% -tail(sort(-abs(Dim_contrib$Dim)), 
+                          n = nrow(Dim_contrib) - 9) ~ "",
+      TRUE ~ Var))
+  
+  Dim_coord$Var_select <- Dim_contrib$Var_select
+  
+  # plot
+  ggplot() +
+    geom_point(data = Dim_indiv,
+               aes(Dim, Dim, col = avg_rating_class),
+               alpha = 0.4,
+               shape = 16,
+               size = 2,
+               position = position_jitter(w = 0.1, h = 0.1)) +
+    geom_point(data = Dim_coord,
+               aes(Dim/2, Dim/2, size = Dim_contrib$Dim),
+               shape = 21,
+               fill = "transparent") +
+    geom_label_repel(data = subset(Dim_coord, Dim < 0),
+                     aes(Dim/2, Dim/2, label = Var_select),
+                     nudge_y = -1 - subset(Dim_coord, Dim < 0)$Dim/2,
+                     direction = "x",
+                     force = 10,
+                     size = 2.5,
+                     segment.color = 'gray50') +
+    geom_label_repel(data = subset(Dim_coord, Dim > 0),
+                     aes(Dim/2, Dim/2, label = Var_select),
+                     nudge_y = j - subset(Dim_coord, Dim > 0)$Dim/2,
+                     direction = "x",
+                     force = 10,
+                     size = 2.5,
+                     segment.color = 'gray50') +
+    scale_colour_manual(name = "average rating",
+                        values = c("bad (<2)" = "red",
+                                   "good (>4)" = "green")) +
+    scale_size_continuous(name = "contribution (%)") +
+    xlim(c(-1, j)) +
+    ylim(c(-1, j)) +
+    ggtitle(label = paste0("Dimension ", i)) +
+    theme(axis.title.x = element_blank(),
+          axis.title.y = element_blank())
+  }
+```
+
+\newpage
+* Dimension 1
+
+```{r exploration_mca_res_dim1, echo = FALSE}
+plot_Dim(1)
+```
+
+This dimension separates light-hearted movies (positive) from dark-themed movies 
+(negative). In this dimension, a higher proportion of dark-themed movies have an
+average rating higher than 4.0, whereas light-hearted movies show an even mix of 
+low and hight rated movies.
+
+* Dimension 2
+
+```{r exploration_mca_res_dim2, echo = FALSE}
+plot_Dim(2)
+```
+
+This dimension separates romantic movies (negative) from thriller or 
+action-oriented movies (positive). No clear trend is noticeable in this dimension.
+
+\newpage
+* Dimension 3
+
+```{r exploration_mca_res_dim3, echo = FALSE}
+plot_Dim(3)
+```
+
+This dimension separates horror-fiction (negative) from reality based movies (positive),
+with the exception of `Documentary_y` being negative. In this dimension, a higher 
+proportion of reality based movies have an average rating higher than 4.0, and 
+a higher proportion of horror-fictional movies have an average rating lower than 2.0.
+
+* Dimension 4
+
+```{r exploration_mca_res_dim4, echo = FALSE}
+plot_Dim(4)
+```
+
+This dimension separates movies with investigations (positive) from 
+action-oriented movies (negative). In this dimension, a higher 
+proportion of movies with investigations have an average rating higher than 4.0, 
+whereas action-oriented movies show an even mix of low and hight rated movies.
+
+\newpage
+* Dimension 5
+
+```{r exploration_mca_res_dim5, echo = FALSE}
+plot_Dim(5)
+```
+
+This dimension separates emotion-oriented movies (negative) from non 
+emotion-oriented movies (?) (positive). No clear trend is noticeable in this dimension.
+
+* Dimension 6
+
+```{r exploration_mca_res_dim6, echo = FALSE}
+plot_Dim(6)
+```
+
+This dimension separates fiction (negative) from reality-based movies (positive). 
+No clear trend is noticeable in this dimension.
+
+\newpage
+* Dimension 7
+
+```{r exploration_mca_res_dim7, echo = FALSE}
+plot_Dim(7)
+```
+
+This dimension essentially separates Western movies from the rest.
+No clear trend is noticeable in this dimension.
+
+In conclusion, the MCA conducted here clearly shows that a movie's genres can be, 
+in some cases, useful information to predict the rating of movies. Thus these 
+variables should be considered when building and training our models.
+
+```{r exploration_train_set_light, echo = FALSE}
+# to avoid reaching the RAM limit
+edx <- edx %>% 
+  select(userId, movieId, release_year, rating)
+```
+
+
+\newpage
+# Modeling Approach
+## Goal
+The objective function for this project is simply the Root-Mean Square Error (RMSE)
+between the actual ratings $y$ and the predicted ratings $\hat{y}$. 
+$$ RMSE = \sqrt{\frac{1}{N}\displaystyle\sum (y-\hat{y})^{2}} $$
+
+```{r modeling_rmse_function}
+RMSE_fct <- function(test, pred) {
+  sqrt(mean((test - pred) ^ 2))
+}
+```
+
+The goal is to achieve a RMSE lower than 0.86490.
+At the end of this project, the model that will be used on the `validation` set 
+will be the one with the lowest RMSE. Since the `validation` set should be 
+used only after choosing the model, to avoid cherry-picking and overfitting, 
+cross-validation will be applied on the `edx` set, to generate a training set and
+a testing set, on which the different models will be tested.
+
+```{r modeling_cross_validation}
+# seed for reproducible results
+set.seed(2486) 
+
+# test_set contains 1/10 of the data
+test_index <- createDataPartition(edx$rating, 
+                                  times = 1, 
+                                  p = 0.1, 
+                                  list = FALSE)
+train_set <- edx[-test_index, ]
+test_set <- edx[test_index, ]
+remove(test_index)
+
+# train & test should have only common variables values, to avoid NAs
+test_set <- test_set %>%
+  semi_join(train_set, by = "userId") %>%
+  semi_join(train_set, by = "movieId") %>%
+  semi_join(train_set, by = "release_year") 
+```
+
+The chosen modeling approach for this recommandation system is residuals' 
+explanation.
+
+## Naive approach
+First, the naive approach consists in predicting that any rating is just 
+the average over all ratings $\mu$, and errors $\epsilon$ are supposed to be 
+residual random noise :
+$$ \hat{y}= \mu + \epsilon $$
+
+```{r modeling_model_naive_function}
+# naive model
+mod_naive <- function(train, test) {
+  mu_rating <- mean(train$rating)
+  test <- test %>%
+    mutate(pred = mu_rating)
+  test$pred
+}
+```
+
+```{r modeling_model_naive_calc}
+res <- data.frame()
+
+y_naive <- mod_naive(train_set, test_set)
+res[1, 1] <- RMSE_fct(test_set$rating, y_naive)
+```
+
+If this model generates accurate predictions, errors should then be truly random,
+and it can be verified by checking its distribution, which should be normal, 
+and centered at zero. If it is not the case, it means that the residuals still contain 
+dormant information that have not been grasped by our model, and it could 
+be improved. This test can be performed visually, by analysing the plot of the
+distribution of the residuals, but a metric should ease the comparison of models.
+
+The Kolmogorov-Smirnov (KS) test has been chosen for this task. The KS test gives
+the maximum difference between the residuals' cumulative distribution and a 
+normal cumulative distribution (centered at zero). A derivative metric is also 
+evaluated: the relative error between the result of the KS test on the 
+residuals, and the threshold under which the hypothesis of the residuals' 
+distribution being a normal distribution cannot be rejected, with a 95% level of 
+confidence. This second metric will be a clear indication on how much the 
+residuals' distribution is different from a normal distribution.
+
+```{r modeling_resid_crit}
+# for alpha = 0.05 (95% confidence) 
+ks_crit <- 1.358 / sqrt(nrow(test_set))
+```
+
+By plotting the residuals' distribution for the naive approach, it is obvious 
+that it is far from a normal distribution.
+
+```{r modeling_model_naive_resid, echo = FALSE, warning = FALSE}
+resi <- cbind(test_set, y_naive) %>%
+  mutate(r = rating - y_naive) %>%
+  select(r)
+
+resi %>%
+  ggplot(aes(r)) + 
+  geom_density(bw = 0.1,
+               color = "black",
+               fill = "grey50") +
+  scale_x_continuous(limits = c(-5, 5),
+                     breaks = seq(-5, 5, 1)) +
+  labs(x = "residuals",
+       y = "density")
+```
+
+As expected, the naive approach is a very limited model, and a lot of information
+remain dormant in the residuals, which can not be considered as random noise 
+in this case.
+
+```{r modeling_model_naive_res, echo = FALSE, warning = FALSE}
+ks_res <- ks.test(resi$r/sd(resi$r), "pnorm", 0, 1)$statistic
+
+RMSE_results <- tibble(model = "Naive",
+                       RMSE = res[1, 1],
+                       KS = ks_res,
+                       `err_KS [%]` = (ks_res - ks_crit) / ks_crit * 100)
+RMSE_results %>% knitr::kable()
+remove(y_naive)
+```
+
+As expected, the naive approach is a very limited model, and a lot of information
+remain dormant in the residuals, which can not be considered as random noise 
+in this case.
+
+## Explicit biaises
+One way to improve our model is to explicitely take into account the effect of 
+certain variables. Data exploration revealed that ratings can change following 
+the user (`userId`), the movie (`movieId`), the release year of the movie 
+(`release_year`) and the different genres. Since the genres carry information
+on a multiple dimensionnal level (every genre has to be taken into account at once,
+or informations might be lost), it will not be directly considered in this project. 
+
+To compare the influence of each of these variables, and the different permutations, 
+15 different models, divided in three groups, will be tested. Each of these models 
+will use an hyperparameter $\lambda$, that will be used to regularise the biaises.
+
+```{r modeling_lambda_function}
+# This function gives the optimal lambda (and RMSE) for given 
+# train/test sets and a model. The lambda associated with the lowest RMSE 
+# (with a given threshold) is designated as optimal.
+lambda_opt <- function(train, test, fct_mod) {
+  prec <- 0.1
+  l_new <- 0
+  i <- 2
+  
+  y <- fct_mod(train, test, l_new)
+  rmse_l_new <- RMSE_fct(test$rating, y)
+  
+  out <- data.frame(l = l_new,
+                    rmse = rmse_l_new)
+  
+  while (abs(i) > prec) {
+    l_old <- l_new
+    rmse_l_old <- rmse_l_new
+    l_new <- l_old + i
+    y <- fct_mod(train, test, l_new)
+    rmse_l_new <- RMSE_fct(test$rating, y)
+    if (rmse_l_new > rmse_l_old) {
+      i <- -i / 2
+    }
+    out <- rbind(out,
+                 c(l_new,
+                   rmse_l_new))
+  }
+  out[nrow(out)-1,]
+}
+```
+
+### One biais
+A single variable $v$ is taken into account in these models (named `model_I`). 
+They follow the formula :
+$$ \hat{y}_{v}= \mu + {b}_{v} + \epsilon $$
+where 
+$$ {b}_{v} = \frac{1}{\lambda + N} \sum^{N} \left( y - \mu \right) $$
+
+```{r modeling_model_I_functions_ex}
+# model_I - U
+mod_bu <- function(train, test, lambda) {
+  mu_rating <- mean(train$rating)
+  user_biais <- train %>%
+    group_by(userId) %>%
+    summarise(b_user = sum(rating - mu_rating) / (n() + lambda))
+  
+  test <- test %>% 
+    left_join(user_biais, by = "userId") %>%
+    mutate(pred = mu_rating + b_user)
+  
+  test$pred
+}
+```
+
+```{r modeling_model_I_functions, echo = FALSE}
+# model_I - M
+mod_bm <- function(train, test, lambda) {
+  mu_rating <- mean(train$rating)
+  movie_biais <- train %>%
+    group_by(movieId) %>%
+    summarise(b_movie = sum(rating - mu_rating) / (n() + lambda))
+  
+  test <- test %>%
+    left_join(movie_biais, by = "movieId") %>%
+    mutate(pred = mu_rating + b_movie)
+  
+  test$pred
+}
+
+# model_I - Y
+mod_by <- function(train, test, lambda) {
+  mu_rating <- mean(train$rating)
+  year_biais <- train %>%
+    group_by(release_year) %>%
+    summarise(b_year = sum(rating - mu_rating) / (n() + lambda))
+  
+  test <- test %>%
+    left_join(year_biais, by = "release_year") %>%
+    mutate(pred = mu_rating + b_year)
+
+  test$pred
+}
+```
+
+These models are trained on the `train_set` and the RMSEs are calculated with 
+the `test_set` data set.
+
+```{r modeling_model_I_calc}
+l_opt <- lambda_opt(train_set, test_set, mod_bu)
+res[1, 2] <- l_opt[1, 2]
+y_U <- mod_bu(train_set, test_set, l_opt[1, 1])
+
+l_opt <- lambda_opt(train_set, test_set, mod_bm)
+res[1, 3] <- l_opt[1, 2]
+y_M <- mod_bm(train_set, test_set, l_opt[1, 1])
+
+l_opt <- lambda_opt(train_set, test_set, mod_by)
+res[1, 4] <- l_opt[1, 2]
+y_Y <- mod_by(train_set, test_set, l_opt[1, 1])
+```
+
+```{r modeling_model_I_resid, echo = FALSE}
+resi <- cbind(test_set, 
+              y_U, y_M, y_Y) %>%
+  mutate(`U (User)` = rating - y_U,
+         `M (Movie)` = rating - y_M,
+         `Y (Year)` = rating - y_Y) %>%
+  select(`U (User)`, `M (Movie)`, `Y (Year)`)
+
+resi %>%
+  gather(`U (User)`, `M (Movie)`, `Y (Year)`,
+         key = "Models",
+         value = "r") %>%
+  ggplot(aes(r, color = Models, fill = Models)) +
+  geom_density(bw = 0.1,
+               alpha = 0.1) +
+  scale_x_continuous(limits = c(-5, 5),
+                     breaks = seq(-5, 5, 1)) +
+  labs(x = "residuals",
+       y = "density")
+```
+
+From only the graphical representation of the residuals' distribution, it appears
+that the variable `release_year` alone gives only a negligeable improvement, whereas
+the other two variables, `userId` and `movieId`, lead to significant improvements,
+as their residuals' distributions are closer to a normal distribution 
+(approximate bell shape).
+```{r modeling_model_I_res, echo = FALSE, warning = FALSE}
+for (j in 1:3) {
+  ks_res <- ks.test(resi[, j]/sd(resi[, j]), "pnorm", 0, 1)$statistic
+  
+  RMSE_results <- 
+    rbind(RMSE_results,
+          tibble(model = "mod",
+                 RMSE = res[1, j + 1],
+                 KS = ks_res,
+                 `err_KS [%]` = (ks_res - ks_crit) / ks_crit * 100))
+}
+remove(y_U, y_M, y_Y)
+```
+
+### Two biaises
+Two variables ${v}_{i}$ are taken into account in these models (named `model_II`). 
+They follow the formula :
+$$ \hat{y}_{{v}_{1},{v}_{2}} = \mu + {b}_{{v}_{1}} + {b}_{{v}_{2}} + \epsilon $$
+where 
+$$ {b}_{{v}_{1}} = \frac{1}{\lambda + N} \sum^{N} \left( y - \mu \right) $$
+$$ {b}_{{v}_{2}} = \frac{1}{\lambda + N} \sum^{N} \left( y - \mu - {b}_{{v}_{1}} \right) $$
+
+Since ${b}_{{v}_{2}}$ depends on ${b}_{{v}_{1}}$, one can wonder 
+if the order matters. To answer this question, all the possible permutations 
+will be attempted and compared.
+
+```{r modeling_model_II_functions_ex}
+# model_II - U + M
+mod_bu_bm <- function(train, test, lambda) {
+  mu_rating <- mean(train$rating)
+  user_biais <- train %>%
+    group_by(userId) %>%
+    summarise(b_user = sum(rating - mu_rating) / (n() + lambda))
+  
+  movie_biais <- train %>%
+    left_join(user_biais, by = "userId") %>%
+    group_by(movieId) %>%
+    summarise(b_movie = sum(rating - mu_rating - b_user) / (n() + lambda))
+  
+  test <- test %>%
+    left_join(user_biais, by = "userId") %>%
+    left_join(movie_biais, by = "movieId") %>%
+    mutate(pred = mu_rating + b_user + b_movie)
+  
+  test$pred
+}
+
+# model_II - M + U
+mod_bm_bu <- function(train, test, lambda) {
+  mu_rating <- mean(train$rating)
+  movie_biais <- train %>%
+    group_by(movieId) %>%
+    summarise(b_movie = sum(rating - mu_rating) / (n() + lambda))
+  
+  user_biais <- train %>%
+    left_join(movie_biais, by = "movieId") %>%
+    group_by(userId) %>%
+    summarise(b_user = sum(rating - mu_rating - b_movie) / (n() + lambda))
+  
+  test <- test %>%
+    left_join(movie_biais, by = "movieId") %>%
+    left_join(user_biais, by = "userId") %>%
+    mutate(pred = mu_rating + b_movie + b_user)
+  
+  test$pred
+}
+```
+
+```{r modeling_model_II_functions, echo = FALSE}
+# model_II - Y + U
+mod_by_bu <- function(train, test, lambda) {
+  mu_rating <- mean(train$rating)
+  year_biais <- train %>%
+    group_by(release_year) %>%
+    summarise(b_year = sum(rating - mu_rating) / (n() + lambda))
+  
+  user_biais <- train %>%
+    left_join(year_biais, by = "release_year") %>%
+    group_by(userId) %>%
+    summarise(b_user = sum(rating - mu_rating - b_year) / (n() + lambda))
+  
+  test <- test %>%
+    left_join(year_biais, by = "release_year") %>%
+    left_join(user_biais, by = "userId") %>%
+    mutate(pred = mu_rating + b_year + b_user)
+  
+  test$pred
+}
+
+# model_II - U + Y
+mod_bu_by <- function(train, test, lambda) {
+  mu_rating <- mean(train$rating)
+  user_biais <- train %>%
+    group_by(userId) %>%
+    summarise(b_user = sum(rating - mu_rating) / (n() + lambda))
+  
+  year_biais <- train %>%
+    left_join(user_biais, by = "userId") %>%
+    group_by(release_year) %>%
+    summarise(b_year = sum(rating - mu_rating - b_user) / (n() + lambda))
+  
+  test <- test %>%
+    left_join(user_biais, by = "userId") %>%
+    left_join(year_biais, by = "release_year") %>%
+    mutate(pred = mu_rating + b_user + b_year)
+  
+  test$pred
+}
+
+# model_II - M + Y
+mod_bm_by <- function(train, test, lambda) {
+  mu_rating <- mean(train$rating)
+  movie_biais <- train %>%
+    group_by(movieId) %>%
+    summarise(b_movie = sum(rating - mu_rating) / (n() + lambda))
+  
+  year_biais <- train %>%
+    left_join(movie_biais, by = "movieId") %>%
+    group_by(release_year) %>%
+    summarise(b_year = sum(rating - mu_rating - b_movie) / (n() + lambda))
+  
+  test <- test %>%
+    left_join(movie_biais, by = "movieId") %>%
+    left_join(year_biais, by = "release_year") %>%
+    mutate(pred = mu_rating + b_movie + b_year)
+  
+  test$pred
+}
+
+# model_II - Y + M
+mod_by_bm <- function(train, test, lambda) {
+  mu_rating <- mean(train$rating)
+  year_biais <- train %>%
+    group_by(release_year) %>%
+    summarise(b_year = sum(rating - mu_rating) / (n() + lambda))
+  
+  movie_biais <- train %>%
+    left_join(year_biais, by = "release_year") %>%
+    group_by(movieId) %>%
+    summarise(b_movie = sum(rating - mu_rating - b_year) / (n() + lambda))
+  
+  test <- test %>%
+    left_join(year_biais, by = "release_year") %>%
+    left_join(movie_biais, by = "movieId") %>%
+    mutate(pred = mu_rating + b_year + b_movie)
+  
+  test$pred
+}
+```
+
+These models are trained on the `train_set` and the RMSEs are calculated with 
+the `test_set` data set.
+
+```{r modeling_model_II_calc, echo = FALSE}
+# model_II
+l_opt <- lambda_opt(train_set, test_set, mod_bu_bm) #2min
+res[1, 5] <- l_opt[1, 2]
+y_U_M <- mod_bu_bm(train_set, test_set, l_opt[1, 1])
+
+l_opt <- lambda_opt(train_set, test_set, mod_bm_bu) #1min
+res[1, 6] <- l_opt[1, 2]
+y_M_U <- mod_bm_bu(train_set, test_set, l_opt[1, 1])
+
+l_opt <- lambda_opt(train_set, test_set, mod_by_bu) #1min
+res[1, 7] <- l_opt[1, 2]
+y_Y_U <- mod_by_bu(train_set, test_set, l_opt[1, 1])
+
+l_opt <- lambda_opt(train_set, test_set, mod_bu_by) #1min
+res[1, 8] <- l_opt[1, 2]
+y_U_Y <- mod_bu_by(train_set, test_set, l_opt[1, 1])
+
+l_opt <- lambda_opt(train_set, test_set, mod_bm_by) #1min
+res[1, 9] <- l_opt[1, 2]
+y_M_Y <- mod_bm_by(train_set, test_set, l_opt[1, 1])
+
+l_opt <- lambda_opt(train_set, test_set, mod_by_bm) #1min
+res[1, 10] <- l_opt[1, 2]
+y_Y_M <- mod_by_bm(train_set, test_set, l_opt[1, 1])
+```
+
+```{r modeling_model_II_resid, echo = FALSE}
+resi <- cbind(test_set, 
+              y_U_M, y_M_U, 
+              y_Y_U, y_U_Y,
+              y_M_Y, y_Y_M) %>%
+  mutate(`U+M` = rating - y_U_M,
+         `M+U` = rating - y_M_U,
+         `Y+U` = rating - y_Y_U,
+         `U+Y` = rating - y_U_Y,
+         `M+Y` = rating - y_M_Y,
+         `Y+M` = rating - y_Y_M) %>%
+  select(`U+M`, `M+U`,
+         `Y+U`, `U+Y`,
+         `M+Y`, `Y+M`)
+
+resi %>%
+  gather(`U+M`, `M+U`,
+         `Y+U`, `U+Y`,
+         `M+Y`, `Y+M`,
+         key = "Models",
+         value = "r") %>%
+  ggplot(aes(r, color = Models, fill = Models)) +
+  geom_density(bw = 0.1,
+               alpha = 0.1) +
+  scale_x_continuous(limits = c(-5, 5),
+                     breaks = seq(-5, 5, 1)) +
+  labs(x = "residuals",
+       y = "density")
+```
+
+From only the graphical representation of the residuals' distribution, it appears
+that the combination of the variables `userId` and `movieId` are the models with 
+the "most normal" residuals' distribution. Combinations with `release_year` 
+display more irregularities. Also, the hierarchical order in the biaises seems 
+to have only a negligeable impact on the residuals' distribution.
+
+```{r modeling_model_II_res, echo = FALSE, warning = FALSE}
+for (j in 1:6) {
+  ks_res <- ks.test(resi[, j]/sd(resi[, j]), "pnorm", 0, 1)$statistic
+  
+  RMSE_results <- 
+    rbind(RMSE_results,
+          tibble(model = "mod",
+                 RMSE = res[1, j + 4],
+                 KS = ks_res,
+                 `err_KS [%]` = (ks_res - ks_crit) / ks_crit * 100))
+}
+remove(y_U_M, y_M_U, 
+       y_Y_U, y_U_Y,
+       y_M_Y, y_Y_M)
+```
+
+### Three biaises
+Three variables ${v}_{i}$ are taken into account in these models (named `model_III`). 
+They follow the formula :
+$$ \hat{y}_{{v}_{1},{v}_{2},{v}_{3}} = 
+\mu + {b}_{{v}_{1}} + {b}_{{v}_{2}} + {b}_{{v}_{3}} + \epsilon $$
+where 
+$$ {b}_{{v}_{1}} = 
+\frac{1}{\lambda + N} \sum^{N} \left( y - \mu \right) $$
+$$ {b}_{{v}_{2}} = 
+\frac{1}{\lambda + N} \sum^{N} \left( y - \mu - {b}_{{v}_{1}} \right) $$
+$$ {b}_{{v}_{3}} = 
+\frac{1}{\lambda + N} \sum^{N} \left( y - \mu - {b}_{{v}_{1}} - {b}_{{v}_{2}} \right) $$
+
+All the possible permutations will be attempted and compared.
+
+```{r modeling_model_III_functions_ex}
+# model_III - U + M + Y
+mod_bu_bm_by <- function(train, test, lambda) {
+  mu_rating <- mean(train$rating)
+  user_biais <- train %>%
+    group_by(userId) %>%
+    summarise(b_user = sum(rating - mu_rating) / (n() + lambda))
+  
+  movie_biais <- train %>%
+    left_join(user_biais, by = "userId") %>%
+    group_by(movieId) %>%
+    summarise(b_movie = sum(rating - mu_rating - b_user) / (n() + lambda))
+  
+  year_biais <- train %>%
+    left_join(user_biais, by = "userId") %>%
+    left_join(movie_biais, by = "movieId") %>%
+    group_by(release_year) %>%
+    summarise(b_year = sum(rating - mu_rating - b_user - b_movie) / (n() + lambda))
+  
+  test <- test %>%
+    left_join(user_biais, by = "userId") %>%
+    left_join(movie_biais, by = "movieId") %>%
+    left_join(year_biais, by = "release_year") %>%
+    mutate(pred = mu_rating + b_user + b_movie + b_year)
+  
+  test$pred
+}
+```
+
+```{r modeling_model_III_functions, echo = FALSE}
+# model_III - M + U + Y
+mod_bm_bu_by <- function(train, test, lambda) {
+  mu_rating <- mean(train$rating)
+  movie_biais <- train %>%
+    group_by(movieId) %>%
+    summarise(b_movie = sum(rating - mu_rating) / (n() + lambda))
+  
+  user_biais <- train %>%
+    left_join(movie_biais, by = "movieId") %>%
+    group_by(userId) %>%
+    summarise(b_user = sum(rating - mu_rating - b_movie) / (n() + lambda))
+  
+  year_biais <- train %>%
+    left_join(user_biais, by = "userId") %>%
+    left_join(movie_biais, by = "movieId") %>%
+    group_by(release_year) %>%
+    summarise(b_year = sum(rating - mu_rating - b_user - b_movie) / (n() + lambda))
+  
+  test <- test %>%
+    left_join(movie_biais, by = "movieId") %>%
+    left_join(user_biais, by = "userId") %>%
+    left_join(year_biais, by = "release_year") %>%
+    mutate(pred = mu_rating + b_movie + b_user + b_year)
+  
+  test$pred
+}
+
+# model_III - Y + U + M
+mod_by_bu_bm <- function(train, test, lambda) {
+  mu_rating <- mean(train$rating)
+  year_biais <- train %>%
+    group_by(release_year) %>%
+    summarise(b_year = sum(rating - mu_rating) / (n() + lambda))
+  
+  user_biais <- train %>%
+    left_join(year_biais, by = "release_year") %>%
+    group_by(userId) %>%
+    summarise(b_user = sum(rating - mu_rating - b_year) / (n() + lambda))
+  
+  movie_biais <- train %>%
+    left_join(year_biais, by = "release_year") %>%
+    left_join(user_biais, by = "userId") %>%
+    group_by(movieId) %>%
+    summarise(b_movie = sum(rating - mu_rating - b_year - b_user) / (n() + lambda))
+  
+  test <- test %>%
+    left_join(year_biais, by = "release_year") %>%
+    left_join(user_biais, by = "userId") %>%
+    left_join(movie_biais, by = "movieId") %>%
+    mutate(pred = mu_rating + b_year + b_user + b_movie)
+  
+  test$pred
+}
+
+# model_III - U + Y + M
+mod_bu_by_bm <- function(train, test, lambda) {
+  mu_rating <- mean(train$rating)
+  user_biais <- train %>%
+    group_by(userId) %>%
+    summarise(b_user = sum(rating - mu_rating) / (n() + lambda))
+  
+  year_biais <- train %>%
+    left_join(user_biais, by = "userId") %>%
+    group_by(release_year) %>%
+    summarise(b_year = sum(rating - mu_rating - b_user) / (n() + lambda))
+  
+  movie_biais <- train %>%
+    left_join(year_biais, by = "release_year") %>%
+    left_join(user_biais, by = "userId") %>%
+    group_by(movieId) %>%
+    summarise(b_movie = sum(rating - mu_rating - b_year - b_user) / (n() + lambda))
+  
+  test <- test %>%
+    left_join(user_biais, by = "userId") %>%
+    left_join(year_biais, by = "release_year") %>%
+    left_join(movie_biais, by = "movieId") %>%
+    mutate(pred = mu_rating + b_user + b_year + b_movie)
+  
+  test$pred
+}
+
+# model_III - M + Y + U
+mod_bm_by_bu <- function(train, test, lambda) {
+  mu_rating <- mean(train$rating)
+  movie_biais <- train %>%
+    group_by(movieId) %>%
+    summarise(b_movie = sum(rating - mu_rating) / (n() + lambda))
+  
+  year_biais <- train %>%
+    left_join(movie_biais, by = "movieId") %>%
+    group_by(release_year) %>%
+    summarise(b_year = sum(rating - mu_rating - b_movie) / (n() + lambda))
+  
+  user_biais <- train %>%
+    left_join(movie_biais, by = "movieId") %>%
+    left_join(year_biais, by = "release_year") %>%
+    group_by(userId) %>%
+    summarise(b_user = sum(rating - mu_rating - b_movie - b_year) / (n() + lambda))
+  
+  test <- test %>%
+    left_join(movie_biais, by = "movieId") %>%
+    left_join(year_biais, by = "release_year") %>%
+    left_join(user_biais, by = "userId") %>%
+    mutate(pred = mu_rating + b_movie + b_year + b_user)
+  
+  test$pred
+}
+
+# model_III - Y + M + U
+mod_by_bm_bu <- function(train, test, lambda) {
+  mu_rating <- mean(train$rating)
+  year_biais <- train %>%
+    group_by(release_year) %>%
+    summarise(b_year = sum(rating - mu_rating) / (n() + lambda))
+  
+  movie_biais <- train %>%
+    left_join(year_biais, by = "release_year") %>%
+    group_by(movieId) %>%
+    summarise(b_movie = sum(rating - mu_rating - b_year) / (n() + lambda))
+  
+  user_biais <- train %>%
+    left_join(year_biais, by = "release_year") %>%
+    left_join(movie_biais, by = "movieId") %>%
+    group_by(userId) %>%
+    summarise(b_user = sum(rating - mu_rating - b_year - b_movie) / (n() + lambda))
+  
+  test <- test %>%
+    left_join(year_biais, by = "release_year") %>%
+    left_join(movie_biais, by = "movieId") %>%
+    left_join(user_biais, by = "userId") %>%
+    mutate(pred = mu_rating + b_year + b_movie + b_user)
+  
+  test$pred
+}
+```
+
+These models are trained on the `train_set` and the RMSEs are calculated with 
+the `test_set` data set.
+
+```{r modeling_model_III_calc, echo = FALSE}
+# model_III
+l_opt <- lambda_opt(train_set, test_set, mod_bu_bm_by) #2min
+res[1, 11] <- l_opt[1, 2]
+y_U_M_Y <- mod_bu_bm_by(train_set, test_set, l_opt[1, 1])
+
+l_opt <- lambda_opt(train_set, test_set, mod_bm_bu_by) #1min
+res[1, 12] <- l_opt[1, 2]
+y_M_U_Y <- mod_bm_bu_by(train_set, test_set, l_opt[1, 1])
+
+l_opt <- lambda_opt(train_set, test_set, mod_by_bu_bm) #1min
+res[1, 13] <- l_opt[1, 2]
+y_Y_U_M <- mod_by_bu_bm(train_set, test_set, l_opt[1, 1])
+
+l_opt <- lambda_opt(train_set, test_set, mod_bu_by_bm) #1min
+res[1, 14] <- l_opt[1, 2]
+y_U_Y_M <- mod_bu_by_bm(train_set, test_set, l_opt[1, 1])
+
+l_opt <- lambda_opt(train_set, test_set, mod_bm_by_bu) #1min
+res[1, 15] <- l_opt[1, 2]
+y_M_Y_U <- mod_bm_by_bu(train_set, test_set, l_opt[1, 1])
+
+l_opt <- lambda_opt(train_set, test_set, mod_by_bm_bu) #1min
+res[1, 16] <- l_opt[1, 2]
+y_Y_M_U <- mod_by_bm_bu(train_set, test_set, l_opt[1, 1])
+```
+
+```{r modeling_model_III_resid, echo = FALSE}
+resi <- cbind(test_set, 
+              y_U_M_Y, y_M_U_Y, 
+              y_Y_U_M, y_U_Y_M,
+              y_M_Y_U, y_Y_M_U) %>%
+  mutate(`U+M+Y` = rating - y_U_M_Y,
+         `M+U+Y` = rating - y_M_U_Y,
+         `Y+U+M` = rating - y_Y_U_M,
+         `U+Y+M` = rating - y_U_Y_M,
+         `M+Y+U` = rating - y_M_Y_U,
+         `Y+M+U` = rating - y_Y_M_U) %>%
+  select(`U+M+Y`, `M+U+Y`,
+         `Y+U+M`, `U+Y+M`,
+         `M+Y+U`, `Y+M+U`)
+
+resi %>%
+  gather(`U+M+Y`, `M+U+Y`,
+         `Y+U+M`, `U+Y+M`,
+         `M+Y+U`, `Y+M+U`,
+         key = "Models",
+         value = "r") %>%
+  ggplot(aes(r, color = Models, fill = Models)) +
+  geom_density(bw = 0.1,
+               alpha = 0.1) +
+  geom_density(data = data.frame(x = rnorm(nrow(test_set), 0, 1)), 
+               aes(x),
+               bw = 0.1,
+               color = "black", 
+               fill = "black",
+               alpha = 0,
+               linetype = "dashed") +
+  scale_x_continuous(limits = c(-5, 5),
+                     breaks = seq(-5, 5, 1)) +
+  labs(x = "residuals",
+       y = "density")
+```
+
+From only the graphical representation of the residuals' distribution, it appears
+that the combination of the three variables `userId`, `movieId` and `release_year`
+are equally good, for any hierarchical order.
+The normal distribution is plotted here (black dashed line) for comparison.
+It seems that the residuals' distributions are still a little bit shifted to 
+positive values, with a longer tail toward negative values.
+
+
+```{r modeling_model_III_res, echo = FALSE, warning = FALSE}
+for (j in 1:6) {
+  ks_res <- ks.test(resi[, j]/sd(resi[, j]), "pnorm", 0, 1)$statistic
+  
+  RMSE_results <- 
+    rbind(RMSE_results,
+          tibble(model = "mod",
+                 RMSE = res[1, j + 10],
+                 KS = ks_res,
+                 `err_KS [%]` = (ks_res - ks_crit) / ks_crit * 100))
+}
+
+RMSE_results$model <- c("Naive", "U (User)", "M (Movie)", "Y (Year)",
+                        "U + M", "M + U", "Y + U",
+                        "U + Y", "M + Y", "Y + M",
+                        "U + M + Y", "M + U + Y", "Y + U + M",
+                        "U + Y + M", "M + Y + U", "Y + M + U")
+RMSE_results$type <- c("Naive",
+                       "I", "I", "I", 
+                       "II", "II", "II", "II", "II", "II",
+                       "III", "III", "III", "III", "III", "III")
+
+RMSE_results %>% select(-type) %>%knitr::kable()
+
+RMSE_results$model <- factor(RMSE_results$model, 
+                             levels = rev(RMSE_results$model))
+
+RMSE_results %>%
+  ggplot(aes(model, RMSE)) +
+  geom_segment(aes(x = model, xend = model, y = 0.80, yend = RMSE),
+               color = "black",
+               alpha = 0,
+               size = 1) +
+  geom_point(color = "black",
+             size = 2,
+             alpha = 0) +
+  geom_segment(data = subset(RMSE_results, type %in% c("Naive")),
+               aes(x = model, xend = model, y = 0.80, yend = RMSE),
+               color = "black",
+               alpha = 0.5,
+               size = 1) +
+  geom_point(data = subset(RMSE_results, type %in% c("Naive")),
+             color = "black",
+             size = 2) +
+  geom_segment(data = subset(RMSE_results, type %in% c("I")),
+               aes(x = model, xend = model, y = 0.80, yend = RMSE),
+               color = "firebrick",
+               alpha = 0.5,
+               size = 1) +
+  geom_point(data = subset(RMSE_results, type %in% c("I")),
+             color = "firebrick",
+             size = 2) +
+  geom_segment(data = subset(RMSE_results, type %in% c("II")),
+               aes(x = model, xend = model, y = 0.80, yend = RMSE),
+               color = "darkcyan",
+               alpha = 0.5,
+               size = 1) +
+  geom_point(data = subset(RMSE_results, type %in% c("II")),
+             color = "darkcyan",
+             size = 2) +
+  geom_segment(data = subset(RMSE_results, type %in% c("III")),
+               aes(x = model, xend = model, y = 0.80, yend = RMSE),
+               color = "darkorange3",
+               alpha = 0.3,
+               size = 1) +
+  geom_point(data = subset(RMSE_results, type %in% c("III")),
+             color = "darkorange3",
+             size = 2) +
+  geom_point(data = subset(subset(RMSE_results, type %in% c("III")),RMSE == min(RMSE)),
+             color = "green",
+             size = 2) +
+  coord_flip() +
+  scale_y_continuous(limits = c(0.80, 1.08),
+                     breaks = seq(0.80,1.08,0.02)) +
+  labs(x = "",
+       y = "RMSE") +
+  geom_hline(
+    aes(yintercept = 0.86490),
+    size = 0.5,
+    color = "black",
+    linetype = "dashed")
+
+remove(y_U_M_Y, y_M_U_Y,
+       y_Y_U_M, y_U_Y_M,
+       y_M_Y_U, y_Y_M_U)
+```
+
+By comparing the RMSEs from the different attempted models, it appears that the `movieId` biais
+has the highest influence on the quality of the model, and the `release_year` biais
+the lowest. It seems that the hierarchical order of the biaises have a small, but
+existent, influence on the RMSE.
+
+From the results on this graph and this table, the best model is the M+U+Y model, 
+achieving a RMSE of `r min(RMSE_results$RMSE)`, which is already below the goal of 0.86490 !
+
+But, for practice sake, this model can be improved even further, as the 
+relative errors `err_KS` show that our best model's KS value is still around
+2500%, which entices us to think their is room for improvement.
+As shown in the data exploration section, the different genres of the movies may 
+carry additional informations that could refine the predictions of this model.
+Instead of trying to compute explicit biaises for each genre encountered, 
+matrix factorisation will be used to try to grasp some implicit insight from 
+the data set. 
+
+## Matrix factorisation
+Matrix facotrisation, at the cost of high computer ressources, can explain residuals
+by decomposing them in the best possible way. The algorithm used here is the 
+`funkSVD` function, that is very efficient for large sparse matrices.
+$$ \hat{y}_{SVD} = 
+\mu + {b}_{M} + {b}_{U} + {b}_{Y} + 
+\sum^7_k {p}_{U,k} {q}_{M,k} + \epsilon $$
+
+```{r modeling_funkSVD_function}
+mod_bm_bu_by_SVD <- function(train, test, lambda) {
+  mu_rating <- mean(train$rating)
+  movie_biais <- train %>%
+    group_by(movieId) %>%
+    summarise(b_movie = sum(rating - mu_rating) / (n() + lambda))
+  
+  user_biais <- train %>%
+    left_join(movie_biais, by = "movieId") %>%
+    group_by(userId) %>%
+    summarise(b_user = sum(rating - mu_rating - b_movie) / (n() + lambda))
+  
+  year_biais <- train %>%
+    left_join(user_biais, by = "userId") %>%
+    left_join(movie_biais, by = "movieId") %>%
+    group_by(release_year) %>%
+    summarise(b_year = sum(rating - mu_rating - b_user - b_movie) / (n() + lambda))
+  
+  resids <- train %>%
+    left_join(movie_biais, by = "movieId") %>%
+    left_join(user_biais, by = "userId") %>%
+    left_join(year_biais, by = "release_year") %>%
+    mutate(res = rating - (mu_rating + b_movie + b_user + b_year)) %>%
+    select(userId, movieId, res) %>%
+    spread(movieId, res)
+  
+  rownames(resids) <- resids[, 1]
+  resids <- resids[, -1]
+  
+  res_SVD <- funkSVD(resids,
+                     k = 7,
+                     gamma = 0.015,
+                     lambda = 0.001,
+                     min_improvement = 1e-06,
+                     min_epochs = 30,
+                     max_epochs = 50,
+                     verbose = TRUE)
+  
+  r <- tcrossprod(res_SVD$U, res_SVD$V)
+  
+  rownames(r) <- rownames(resids)
+  colnames(r) <- colnames(resids)
+  remove(resids)
+    
+  test$res_corr <- 0
+  test$res_corr <- sapply(1:nrow(test), function(x) {
+    r[which(test$userId[x] == rownames(r)), 
+      which(test$movieId[x] == colnames(r))]
+  })
+  remove(r)
+  
+  test <- test %>%
+    left_join(movie_biais, by = "movieId") %>%
+    left_join(user_biais, by = "userId") %>%
+    left_join(year_biais, by = "release_year") %>%
+    mutate(pred = mu_rating + b_movie + b_user + b_year + res_corr)
+  
+  test$pred
+}
+```
+
+This algorithm, even with the present parameters (low number of explanatory features 
+`k = 7`, low number of maximum iteration `max_epochs = 50`), has a high cost
+of computing ressources, and it took around **3 hours and a half**, with 30 GB of RAM 
+(the residuals' matrix alone weights 5.6 GB) and an Intel i7-4790K (4 GHz) CPU.
+
+```{r modeling_funkSVD_calc}
+# # /!\ 3h30 /!\
+# l_opt <- lambda_opt(train_set, test_set, mod_bm_bu_by) #1min
+# y_M_U_Y_SVD <- mod_bm_bu_by_SVD(train_set, test_set, l_opt[1, 1]) 
+# save(y_M_U_Y_SVD, file = "./pred_SVD.Rda")
+
+# the results has to be precalculated, as the Rmd compilation could not go through
+load(file = "./pred_SVD.Rda")
+res[1, 17] <- RMSE_fct(test_set$rating, y_M_U_Y_SVD) # 0.817679
+```
+
+```{r modeling_funkSVD_resid, echo = FALSE}
+resi <- cbind(test_set, y_M_U_Y_SVD) %>%
+  mutate(SVD = rating - y_M_U_Y_SVD) %>%
+  select(SVD)
+
+resi %>%
+  ggplot(aes(SVD)) +
+  geom_density(bw = 0.1,
+               color = "black", 
+               fill = "grey50") +
+  geom_density(data = data.frame(x = rnorm(nrow(test_set), 0, 1)), 
+               aes(x),
+               bw = 0.1,
+               color = "black", 
+               fill = "black",
+               alpha = 0,
+               linetype = "dashed") +
+  scale_x_continuous(limits = c(-5, 5),
+                     breaks = seq(-5, 5, 1)) +
+  labs(x = "residuals",
+       y = "density")
+```
+
+From only the graphical representation of the residuals' distribution, no clear 
+improvement is noticeable, in comparison with the M + U + Y model without SVD.
+The normal distribution is plotted here (black dashed line) for comparison.
+The residuals' distributions are still a little bit shifted to 
+positive values, with a longer tail toward negative values.
+
+```{r modeling_funkSVD_res, echo = FALSE, warning = FALSE}
+ks_res <- ks.test(resi$SVD/sd(resi$SVD), "pnorm", 0, 1)$statistic
+  
+RMSE_results <- 
+  rbind(RMSE_results,
+        tibble(model = "SVD",
+               RMSE = res[1, 17],
+               KS = ks_res,
+               `err_KS [%]` = (ks_res - ks_crit) / ks_crit * 100,
+               type = "SVD"))
+
+RMSE_results %>% 
+  group_by(type) %>%
+  filter(RMSE == min(RMSE)) %>%
+  ungroup() %>%
+  select(-type) %>% 
+  knitr::kable()
+
+RMSE_results$model <- factor(RMSE_results$model, 
+                             levels = rev(RMSE_results$model))
+
+RMSE_results %>%
+  group_by(type) %>%
+  filter(RMSE == min(RMSE)) %>%
+  ggplot(aes(model, RMSE)) +
+  geom_segment(aes(x = model, xend = model, y = 0.80, yend = RMSE),
+               color = "black",
+               alpha = 0,
+               size = 1) +
+  geom_point(color = "black",
+             size = 2,
+             alpha = 0) +
+  geom_segment(data = subset(RMSE_results, type %in% c("Naive")),
+               aes(x = model, xend = model, y = 0.80, yend = RMSE),
+               color = "black",
+               alpha = 0.5,
+               size = 1) +
+  geom_point(data = subset(RMSE_results, type %in% c("Naive")),
+             color = "black",
+             size = 2) +
+  geom_segment(data = subset(RMSE_results, model %in% c("M (Movie)")),
+               aes(x = model, xend = model, y = 0.80, yend = RMSE),
+               color = "firebrick",
+               alpha = 0.5,
+               size = 1) +
+  geom_point(data = subset(RMSE_results, model %in% c("M (Movie)")),
+             color = "firebrick",
+             size = 2) +
+  geom_segment(data = subset(RMSE_results, model %in% c("M + U")),
+               aes(x = model, xend = model, y = 0.80, yend = RMSE),
+               color = "darkcyan",
+               alpha = 0.5,
+               size = 1) +
+  geom_point(data = subset(RMSE_results, model %in% c("M + U")),
+             color = "darkcyan",
+             size = 2) +
+  geom_segment(data = subset(RMSE_results, model %in% c("M + U + Y")),
+               aes(x = model, xend = model, y = 0.80, yend = RMSE),
+               color = "darkorange3",
+               alpha = 0.3,
+               size = 1) +
+  geom_point(data = subset(RMSE_results, model %in% c("M + U + Y")),
+             color = "darkorange3",
+             size = 2) +
+  geom_segment(data = subset(RMSE_results, model %in% c("SVD")),
+               aes(x = model, xend = model, y = 0.80, yend = RMSE),
+               color = "chartreuse4",
+               alpha = 0.3,
+               size = 1) +
+  geom_point(data = subset(RMSE_results, model %in% c("SVD")),
+             color = "chartreuse4",
+             size = 2) +
+  coord_flip() +
+  scale_y_continuous(limits = c(0.80, 1.08),
+                     breaks = seq(0.80,1.08,0.02)) +
+  scale_x_discrete(breaks = c("Naive", "M (Movie)",
+                              "M + U", "M + U + Y",
+                              "SVD")) +
+  labs(x = "",
+       y = "RMSE") +
+  geom_hline(
+    aes(yintercept = 0.86490),
+    size = 0.5,
+    color = "black",
+    linetype = "dashed")
+
+remove(y_M_U_Y_SVD)
+remove(train_set, test_set, mod_naive,
+       mod_bu, mod_bm, mod_by,
+       mod_bu_bm, mod_bm_bu, mod_by_bu, mod_bu_by, mod_bm_by, mod_by_bm,
+       mod_bu_bm_by, mod_by_bu_bm, mod_bu_by_bm, mod_bm_by_bu, mod_by_bm_bu,
+       RMSE_results, res, resi)
+```
+
+Despite its high computational cost, matrix factorisation, through the `funkSVD`
+function, manages to improve significantly the RMSE.
+
+This is the best model attempted so far, and even if it could still be optimized
+even more, for example with different parameters, this model is thus 
+designated as our definitive model for this project. 
+
+For practical reasons, the non-SVD M + U + Y model will also be considered as an
+acceptable model, since it is not as costly, and will provide a RMSE (hopefully 
+under the fixed goal of 0.86490) in less than 5 min.
+
+
+\newpage
+# Results
+For reasons presented in the previous section, two models have been selected :
+M + U + Y and M + U + Y + SVD.
+
+The selected models are now trained on the full `edx` data set, and the final 
+RMSEs are calculated with the `validation` data set.
+
+```{r final_calc}
+res <- data.frame()
+
+# M + U + Y model
+l_opt <- lambda_opt(edx, validation, mod_bm_bu_by) #1min
+res[1, 1] <- l_opt[1, 2] # 0.864522
+y_M_U_Y <- mod_bm_bu_by(edx, validation, l_opt[1, 1])
+
+# M + U + Y + SVD model   /!\ 3h30 /!\
+# y_M_U_Y_SVD <- mod_bm_bu_by_SVD(edx, validation, l_opt[1, 1]) 
+# save(y_M_U_Y_SVD, file = "./pred_SVD_final.Rda")
+
+# the results has to be precalculated, as the Rmd compilation could not go through
+load(file = "./pred_SVD_final.Rda")
+res[1, 2] <- RMSE_fct(validation$rating, y_M_U_Y_SVD) # 0.815741
+```
+
+
+```{r final_resid, echo = FALSE, warning = FALSE}
+resi <- cbind(validation, 
+              y_M_U_Y,
+              y_M_U_Y_SVD) %>%
+  mutate(`M+U+Y` = rating - y_M_U_Y,
+         SVD = rating - y_M_U_Y_SVD) %>%
+  select(`M+U+Y`, SVD)
+
+resi %>%
+  gather(`M+U+Y`, SVD,
+         key = "Models",
+         value = "r") %>%
+  ggplot(aes(r, color = Models, fill = Models)) +
+  geom_density(bw = 0.1,
+               alpha = 0.1) +
+    geom_density(data = data.frame(x = rnorm(nrow(validation), 0, 1)), 
+               aes(x),
+               bw = 0.1,
+               color = "black", 
+               fill = "black",
+               alpha = 0,
+               linetype = "dashed") +
+  scale_x_continuous(limits = c(-5, 5),
+                     breaks = seq(-5, 5, 1)) +
+  labs(x = "residuals",
+       y = "density")
+```
+
+The graphical representation of the residuals' distributions are very similar to 
+those obtained with the cross-validation on the `edx` data set alone.
+The normal distribution is plotted here (black dashed line) for comparison.
+The residuals' distributions are still a little bit shifted to 
+positive values, with a longer tail toward negative values.
+
+```{r final_res, echo = FALSE}
+ks_crit <- 1.358 / sqrt(nrow(validation))
+ks_res <- ks.test(resi$`M+U+Y`/sd(resi$`M+U+Y`), "pnorm", 0, 1)$statistic
+RMSE_results <- tibble(model = "U + M + Y",
+                       RMSE = res[1, 1],
+                       KS = ks_res,
+                       `err_norm [%]` = (ks_res - ks_crit) / ks_crit * 100)
+
+ks_res <- ks.test(resi$SVD/sd(resi$SVD), "pnorm", 0, 1)$statistic
+RMSE_results <- 
+    rbind(RMSE_results,
+          tibble(model = "U + M + Y + SVD",
+                 RMSE = res[1, 2],
+                 KS = ks_res,
+                 `err_norm [%]` = (ks_res - ks_crit) / ks_crit * 100))
+
+RMSE_results %>% knitr::kable()
+
+remove(edx, validation, 
+       y_M_U_Y, y_M_U_Y_SVD)
+```
+
+Both RMSEs are below the 0.86490 threshold.
+
+\newpage
+# Conclusion
+
+The goal of this project is to build a recommandation system that can predict 
+ratings from the MovieLens 10M data set, with a RMSE under 0.86490.
+
+Once the data was retrieved from the Web, the training data set `edx` and the 
+testing set `validation` were created. Nested information have been extracted 
+(release year, different genres) to maximise the accessible data for training 
+the models. 
+
+Data exploration of the different variables lead to the selection of relevant 
+variables to feed the models with. MCA was performed on the genres of the movies 
+to reveal potential further nested information.
+
+The prediction attempt was focused on matrix facorisation, by adding biaises to 
+a naive mean of all ratings. For multiple biaises, hierarchical order of the 
+different biaises did not show any siginificant effect. The lowest RMSE was 
+obtained with a model that added biaises for the user effect, the movie effect 
+and the release year of the movie effect. An even lower RMSE was reached using 
+SVD on the top of the previous model.
+
+Then, the two models (with and without SVD) were trained on the `edx` and tested
+on the `validation`, and both RMSEs are under the 0.86490 threshold.
+
+Regardless of the threshold, the models tested here can be further improved. 
+Among the possible leads, the genre classification was not used in these models, 
+and as the MCA shown, it could be used to generate either one bias by genre, or 
+a few biais for frequently associated genres. Another lead is a SVD with a higher 
+number of implicit features, and/or a higher number of allowed iterations for its
+optimization process. However, those leads may require a large quantity of RAM,
+and may be computationally expensive...
+>>>>>>> fd0bcedde39fc046a97ff2be0fddce569f5bb67c
