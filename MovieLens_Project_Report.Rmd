@@ -4270,7 +4270,7 @@ Data exploration of the different variables lead to the selection of relevant
 variables to feed the models with. MCA was performed on the genres of the movies 
 to reveal potential further nested information.
 
-The prediction attempt was focused on matrix facorisation, by adding biaises to 
+The prediction attempt was focused on matrix factorisation, by adding biaises to 
 a naive mean of all ratings. For multiple biaises, hierarchical order of the 
 different biaises did not show any siginificant effect. The lowest RMSE was 
 obtained with a model that added biaises for the user effect, the movie effect 
@@ -4287,4 +4287,4 @@ a few biais for frequently associated genres. Another lead is a SVD with a highe
 number of implicit features, and/or a higher number of allowed iterations for its
 optimization process. However, those leads may require a large quantity of RAM,
 and may be computationally expensive...
->>>>>>> fd0bcedde39fc046a97ff2be0fddce569f5bb67c
+
