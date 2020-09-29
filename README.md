@@ -35,6 +35,8 @@ data for training the models.
 * Using SVD (Single Value Decomposition) on the top of the best multiple biaises model lowered the RMSE even more.
 
 * The results on the final test set showed no sign of overfitting.
+* Final RMSE : 0.86452 (without SVD)
+* Final RMSE : 0.81574 (with SVD)
 
-* Models can be further improved, for example by taking into account the genres of the movies, or by increasing 
+* Models can be further improved, for example by taking into account the genres of the movies as explicit biaises, or by increasing 
 the number of implicit features and/or the number of iterations of the SVD.
