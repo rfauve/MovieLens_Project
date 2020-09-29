@@ -18,14 +18,16 @@ systems, and the best one is selected. Finally, the selected model is applied on
 ### Environment and libraries
 The code presented here was executed in the RStudio IDE (Version 1.2.5042) with R version 3.6.1 (2019-07-05).
 
-The required libraries are: tidyverse, caret, data.table, ggrepel, FactoMineR, factoextra, recommenderlab, explor`
+The required libraries are: 
+
+tidyverse, caret, data.table, ggrepel, FactoMineR, factoextra, recommenderlab, explor
 
 ### Main elements
 * The data (already cleaned) was retrieved from the Web.
 
 * Nested information have been extracted (release year, different genres) to maximise the accessible
 data for training the models.
-* MCA was performed on the genres of the movies to reveal potential further nested information.
+* MCA (Multiple Correspondence Analysis) was performed on the genres of the movies to reveal potential further nested information.
 
 * The prediction attempt was focused on matrix factorisation, by adding biaises to a naive mean of all ratings.
 * For multiple biaises, hierarchical order of the different biaises did not show any siginificant effect.
